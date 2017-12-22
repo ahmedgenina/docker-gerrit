@@ -11,15 +11,53 @@ ENV GERRIT_USER gerrit2
 ENV GERRIT_INIT_ARGS ""
 
 # Add our user and group first to make sure their IDs get assigned consistently, regardless of whatever dependencies get added
-RUN adduser -D -h "${GERRIT_HOME}" -g "Gerrit User" -s /sbin/nologin "${GERRIT_USER}"
+RUN useradd -m -d "${GERRIT_HOME}" -s /usr/sbin/nologin -U "${GERRIT_USER}"
 
-RUN set -x \
-    && apk add --update --no-cache git openssh openssl bash perl perl-cgi git-gitweb curl su-exec procmail
+RUN set -x && \
+    apt-get update && DEBIAN_FRONTEND=nointeractive apt-get install -y \
+      curl \
+      dirmngr \
+      git \
+      gitweb \
+      gnupg \
+      libcgi-pm-perl \
+      openssh-server \
+      openssl \
+      procmail
+
+# Install gosu for easy step-down from root
+ENV GOSU_VERSION 1.10
+RUN set -ex; \
+	\
+	fetchDeps=' \
+                ca-certificates \
+		wget \
+	'; \
+	apt-get update; \
+	apt-get install -y --no-install-recommends $fetchDeps; \
+	rm -rf /var/lib/apt/lists/*; \
+	\
+	dpkgArch="$(dpkg --print-architecture | awk -F- '{ print $NF }')"; \
+	wget -O /usr/local/bin/gosu "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch"; \
+	wget -O /usr/local/bin/gosu.asc "https://github.com/tianon/gosu/releases/download/$GOSU_VERSION/gosu-$dpkgArch.asc"; \
+	\
+# verify the signature
+	export GNUPGHOME="$(mktemp -d)"; \
+	gpg --keyserver ha.pool.sks-keyservers.net --recv-keys B42F6819007F00F88E364FD4036A9C25BF357DD4; \
+	gpg --batch --verify /usr/local/bin/gosu.asc /usr/local/bin/gosu; \
+	rm -rf "$GNUPGHOME" /usr/local/bin/gosu.asc; \
+	\
+	chmod +x /usr/local/bin/gosu; \
+# verify that the binary works
+	gosu nobody true; \
+	\
+	apt-get purge -y --auto-remove $fetchDeps
+# End install gosu
 
 RUN mkdir /docker-entrypoint-init.d
 
 #Download gerrit.war
-RUN curl -fSsL https://gerrit-releases.storage.googleapis.com/gerrit-${GERRIT_VERSION}.war -o $GERRIT_WAR
+RUN curl -L https://gerrit-releases.storage.googleapis.com/gerrit-${GERRIT_VERSION}.war -o $GERRIT_WAR
 #Only for local test
 #COPY gerrit-${GERRIT_VERSION}.war $GERRIT_WAR
 
@@ -29,30 +67,30 @@ ENV GERRITFORGE_URL=https://gerrit-ci.gerritforge.com
 ENV GERRITFORGE_ARTIFACT_DIR=lastSuccessfulBuild/artifact/bazel-genfiles/plugins
 
 #delete-project
-RUN curl -fSsL \
+RUN curl -L \
     ${GERRITFORGE_URL}/job/plugin-delete-project-${PLUGIN_VERSION}/${GERRITFORGE_ARTIFACT_DIR}/delete-project/delete-project.jar \
     -o ${GERRIT_HOME}/delete-project.jar
 
 #events-log
 #This plugin is required by gerrit-trigger plugin of Jenkins.
-RUN curl -fSsL \
+RUN curl -L \
     ${GERRITFORGE_URL}/job/plugin-events-log-${PLUGIN_VERSION}/${GERRITFORGE_ARTIFACT_DIR}/events-log/events-log.jar \
     -o ${GERRIT_HOME}/events-log.jar
 
 #gitiles
-RUN curl -fSsL \
+RUN curl -L \
     ${GERRITFORGE_URL}/job/plugin-gitiles-${PLUGIN_VERSION}/${GERRITFORGE_ARTIFACT_DIR}/gitiles/gitiles.jar \
     -o ${GERRIT_HOME}/gitiles.jar
 
 #oauth2 plugin
 ENV GERRIT_OAUTH_VERSION 2.14.3
 
-RUN curl -fSsL \
+RUN curl -L \
     https://github.com/davido/gerrit-oauth-provider/releases/download/v${GERRIT_OAUTH_VERSION}/gerrit-oauth-provider.jar \
     -o ${GERRIT_HOME}/gerrit-oauth-provider.jar
 
 #importer
-RUN curl -fSsL \
+RUN curl -L \
     ${GERRITFORGE_URL}/job/plugin-importer-${PLUGIN_VERSION}/${GERRITFORGE_ARTIFACT_DIR}/importer/importer.jar \
     -o ${GERRIT_HOME}/importer.jar
 
@@ -63,7 +101,7 @@ RUN chmod +x /gerrit*.sh
 
 #A directory has to be created before a volume is mounted to it.
 #So gerrit user can own this directory.
-RUN su-exec ${GERRIT_USER} mkdir -p $GERRIT_SITE
+RUN gosu ${GERRIT_USER} mkdir -p $GERRIT_SITE
 
 #Gerrit site directory is a volume, so configuration and repositories
 #can be persisted and survive image upgrades.
